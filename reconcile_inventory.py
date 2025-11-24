@@ -59,36 +59,71 @@ def get_tcgplayer_id_from_scryfall(scryfall_id, cache):
         logging.error(f"Scryfall API error: {e}")
     return None
 
-def get_tcgplayer_id_from_pokemon(name, cache):
-    """Resolves TCGPlayer ID via Pokemon TCG API."""
-    # Check cache first (using name as key for simplicity, though risky if duplicates)
-    cache_key = f"POKEMON_{name}"
+def get_tcgplayer_id_from_pokemon_api(card_name, set_name, cache):
+    # Check cache first
+    cache_key = f"pokemon_{card_name}_{set_name}"
     if cache_key in cache:
         return cache[cache_key]
 
-    api_url = "https://api.pokemontcg.io/v2/cards"
-    headers = {"X-Api-Key": POKEMON_API_KEY}
-    params = {"q": f"name:\"{name}\""}
+    logging.info(f"  Searching Pokemon API for: {card_name}...")
+    url = "https://api.pokemontcg.io/v2/cards"
+    headers = {'X-Api-Key': POKEMON_API_KEY}
+    
+    # Construct query
+    query = f'name:"{card_name}"'
+    params = {'q': query, 'pageSize': 10}
     
     try:
-        logging.info(f"  Querying Pokemon API for '{name}'...")
-        response = requests.get(api_url, params=params, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            if "data" in data and len(data["data"]) > 0:
-                # Iterate to find one with a TCGPlayer URL
-                for card in data["data"]:
-                    if "tcgplayer" in card and "url" in card["tcgplayer"]:
-                        url = card["tcgplayer"]["url"]
-                        # Extract ID: https://prices.pokemontcg.io/tcgplayer/42382
-                        import re
-                        match = re.search(r"tcgplayer/(\d+)", url)
-                        if match:
-                            pid = match.group(1)
-                            cache[cache_key] = pid
-                            return pid
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data['count'] == 0:
+            logging.info("    No matches found.")
+            return None
+            
+        # Filter by set name if provided
+        best_match = None
+        if set_name:
+            for card in data['data']:
+                api_set = card['set']['name']
+                # Simple fuzzy match
+                if set_name.lower() in api_set.lower() or api_set.lower() in set_name.lower():
+                    best_match = card
+                    break
+        
+        if not best_match:
+            best_match = data['data'][0] # Fallback
+            
+        # Get TCGPlayer URL
+        tcg_data = best_match.get('tcgplayer', {})
+        tcg_url = tcg_data.get('url')
+        
+        if tcg_url:
+            # Follow redirect to get numeric ID
+            try:
+                logging.info(f"    Resolving TCGPlayer URL: {tcg_url}...")
+                r = requests.head(tcg_url, allow_redirects=True, timeout=10)
+                final_url = r.url
+                
+                # Extract ID: https://www.tcgplayer.com/product/123456/...
+                import re
+                match = re.search(r'/product/(\d+)', final_url)
+                if match:
+                    tcg_id = match.group(1)
+                    logging.info(f"    -> Found ID: {tcg_id}")
+                    cache[cache_key] = tcg_id
+                    return tcg_id
+                else:
+                    logging.warning("    -> Could not extract ID from resolved URL.")
+            except Exception as e:
+                logging.error(f"    -> Error resolving URL: {e}")
+        else:
+            logging.info("    No TCGPlayer URL in API response.")
+
     except Exception as e:
-        logging.error(f"Pokemon API error: {e}")
+        logging.error(f"    Pokemon API Error: {e}")
+        
     return None
 
 def search_product_id(page, name):
@@ -159,22 +194,32 @@ def main():
             pid = row.get('Product ID') or row.get('TCGPlayer ID')
             scry_id = row.get('Scryfall ID')
             name = row.get('Name', 'Unknown')
+            category = row.get('Category', '')
+            set_name = row.get('Set', '')
             
-            # If no PID, try to get from Scryfall ID
-            if not pid and scry_id:
-                logging.info(f"[{i+1}] Resolving ID for {name} via Scryfall...")
-                pid = get_tcgplayer_id_from_scryfall(scry_id, cache)
+            # If no PID, try to resolve
+            if not pid:
+                # Strategy 1: Scryfall (for Magic)
+                if scry_id:
+                    logging.info(f"[{i+1}] Resolving ID for {name} via Scryfall...")
+                    pid = get_tcgplayer_id_from_scryfall(scry_id, cache)
+                
+                # Strategy 2: Pokemon API (for Pokemon)
+                elif category == "Pokemon" or "Pokemon" in category:
+                    logging.info(f"[{i+1}] Resolving ID for {name} via Pokemon API...")
+                    pid = get_tcgplayer_id_from_pokemon_api(name, set_name, cache)
+                
+                # Strategy 3: Search by Name (Fallback)
+                if not pid and name and name != "Unknown":
+                    pid = search_product_id(page, name)
+                    if pid:
+                        logging.info(f"  Found ID via Search: {pid}")
+                
                 if pid:
                     save_cache(cache)
             
-            # If still no PID, try to SEARCH by Name
-            if not pid and name and name != "Unknown":
-                pid = search_product_id(page, name)
-                if pid:
-                    logging.info(f"  Found ID via Search: {pid}")
-            
             if not pid:
-                logging.warning(f"[{i+1}] SKIPPING {name}: No Product ID found (Scryfall or Search).")
+                logging.warning(f"[{i+1}] SKIPPING {name}: No Product ID found.")
                 continue
 
             # 2. Target Data

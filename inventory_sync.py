@@ -129,12 +129,17 @@ def main():
                 print("Scanning page for products...")
                 # Extract rich data from the table rows
                 page_items = page.evaluate("""() => {
-                    const rows = Array.from(document.querySelectorAll("table tbody tr"));
+                    // Find the table with "Product Name" in the header
+                    const tables = Array.from(document.querySelectorAll("table"));
+                    const productTable = tables.find(t => t.innerText.includes("Product Name"));
+                    if (!productTable) return [];
+
+                    const rows = Array.from(productTable.querySelectorAll("tbody tr"));
                     return rows.map(row => {
                         const cells = Array.from(row.querySelectorAll("td"));
-                        if (cells.length < 4) return null;
+                        if (cells.length < 5) return null;
                         
-                        // Product ID from Link
+                        // Product ID from Link (usually in the 'View' column or 'Actions')
                         let pid = "";
                         const link = row.querySelector("a[href*='/admin/product/manage/']");
                         if (link) {
@@ -143,21 +148,27 @@ def main():
                         }
                         if (!pid) return null;
 
-                        // Columns: [Checkbox, Name, Set, Category, ...]
-                        // Note: Column indices might vary slightly, but usually:
-                        // 1: Name
-                        // 2: Set
-                        // 3: Category
+                        // Correct Column Indices based on inspection:
+                        // 0: Product Line (Category)
+                        // 1: View (Image/Link)
+                        // 2: Product Name
+                        // 3: Set
+                        // 4: Rarity
+                        // 5: Number
                         
-                        const name = cells[1] ? cells[1].innerText.trim() : "Unknown";
-                        const set = cells[2] ? cells[2].innerText.trim() : "Unknown";
-                        const category = cells[3] ? cells[3].innerText.trim() : "Unknown";
+                        const category = cells[0] ? cells[0].innerText.trim() : "Unknown";
+                        const name = cells[2] ? cells[2].innerText.trim() : "Unknown";
+                        const set = cells[3] ? cells[3].innerText.trim() : "Unknown";
+                        const rarity = cells[4] ? cells[4].innerText.trim() : "";
+                        const number = cells[5] ? cells[5].innerText.trim() : "";
                         
                         return {
                             id: pid,
                             name: name,
                             set: set,
-                            category: category
+                            category: category,
+                            rarity: rarity,
+                            number: number
                         };
                     }).filter(item => item !== null);
                 }""")
@@ -190,7 +201,7 @@ def main():
             
             # Initialize Report File
             with open(report_file_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=['Product ID', 'Name', 'Set', 'Category', 'Variant', 'Qty', 'Old Price', 'New Price', 'Status'])
+                writer = csv.DictWriter(f, fieldnames=['Product ID', 'Name', 'Set', 'Category', 'Number', 'Rarity', 'Variant', 'Qty', 'Old Price', 'New Price', 'Status'])
                 writer.writeheader()
 
     # --- PHASE 2: PROCESS & UPDATE ---
@@ -213,10 +224,14 @@ def main():
                 pid = item['id']
                 catalog_set = item.get('set', '')
                 catalog_cat = item.get('category', '')
+                catalog_rarity = item.get('rarity', '')
+                catalog_number = item.get('number', '')
             else:
                 pid = item
                 catalog_set = ""
                 catalog_cat = ""
+                catalog_rarity = ""
+                catalog_number = ""
 
             print(f"[{i+1}/{len(product_ids)}] Processing ID: {pid}")
             
@@ -279,9 +294,11 @@ def main():
                     elif "Seller Portal" not in title:
                         product_name = title
 
-                # Use Catalog Data for Set/Category if available, otherwise try to extract
+                # Use Catalog Data for Set/Category/Rarity/Number
                 set_name = catalog_set
                 category = catalog_cat
+                rarity = catalog_rarity
+                number = catalog_number
                 
                 # Fallback Extraction if Catalog Data is missing
                 if not set_name:
@@ -309,7 +326,7 @@ def main():
                                     else: category = slug.split("-")[0].capitalize()
                     except: pass
 
-                print(f"  Product: {product_name} | Set: {set_name} | Cat: {category}")
+                print(f"  Product: {product_name} | Set: {set_name} | Cat: {category} | #: {number}")
             except:
                 pass
             
@@ -364,6 +381,8 @@ def main():
                             'Name': product_name,
                             'Set': set_name,
                             'Category': category,
+                            'Number': number,
+                            'Rarity': rarity,
                             'Variant': variant_name,
                             'Qty': current_qty,
                             'Old Price': old_price,
@@ -372,7 +391,7 @@ def main():
                         }
                         
                         with open(report_file_path, 'a', newline='', encoding='utf-8') as f:
-                            writer = csv.DictWriter(f, fieldnames=['Product ID', 'Name', 'Set', 'Category', 'Variant', 'Qty', 'Old Price', 'New Price', 'Status'])
+                            writer = csv.DictWriter(f, fieldnames=['Product ID', 'Name', 'Set', 'Category', 'Number', 'Rarity', 'Variant', 'Qty', 'Old Price', 'New Price', 'Status'])
                             writer.writerow(row_data)
 
                         # Update Stats
